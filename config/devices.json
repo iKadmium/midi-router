@@ -1,0 +1,124 @@
+{
+    "devices": {
+        "mooer_m2": {
+            "id": "mooer_m2",
+            "name": "Mooer M2",
+            "device_type": "midi",
+            "tempo_spec": {
+                "type": "tap_tempo",
+                "commands": [
+                    {
+                        "type": "control_change",
+                        "channel": 1,
+                        "controller": 64,
+                        "value": 127
+                    }
+                ]
+            },
+            "programs": [
+                {
+                    "number": 1,
+                    "name": "Clean",
+                    "commands": [
+                        {
+                            "type": "program_change",
+                            "channel": 1,
+                            "program": 0
+                        }
+                    ]
+                },
+                {
+                    "number": 2,
+                    "name": "Overdrive",
+                    "commands": [
+                        {
+                            "type": "program_change",
+                            "channel": 1,
+                            "program": 1
+                        },
+                        {
+                            "type": "control_change",
+                            "channel": 1,
+                            "controller": 7,
+                            "value": 100
+                        }
+                    ]
+                },
+                {
+                    "number": 3,
+                    "name": "Distortion",
+                    "commands": [
+                        {
+                            "type": "program_change",
+                            "channel": 1,
+                            "program": 2
+                        },
+                        {
+                            "type": "control_change",
+                            "channel": 1,
+                            "controller": 7,
+                            "value": 127
+                        }
+                    ]
+                }
+            ]
+        },
+        "behringer_x32": {
+            "id": "behringer_x32",
+            "name": "Behringer X32",
+            "device_type": "osc",
+            "tempo_spec": {
+                "type": "raw_tempo",
+                "data_type": "time",
+                "commands": [
+                    {
+                        "type": "osc",
+                        "address": "/fx/2/par/02",
+                        "args": [
+                            {
+                                "type": "normalized",
+                                "min": 0,
+                                "max": 3000,
+                                "value": 1
+                            }
+                        ]
+                    }
+                ]
+            },
+            "programs": [
+                {
+                    "number": 0,
+                    "name": "No Delay",
+                    "commands": [
+                        {
+                            "type": "osc",
+                            "address": "/ch/03/mix/14/on",
+                            "args": [
+                                {
+                                    "type": "int",
+                                    "value": 0
+                                }
+                            ]
+                        }
+                    ]
+                },
+                {
+                    "number": 1,
+                    "name": "Delay On",
+                    "commands": [
+                        {
+                            "type": "osc",
+                            "address": "/ch/03/mix/14/on",
+                            "args": [
+                                {
+                                    "type": "int",
+                                    "value": 1
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+    }
+}

@@ -1,0 +1,17 @@
+[package]
+name = "midi-router"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rtpmidi = { version = "0.4.4", features = ["mdns"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.46.1", features = ["full"] }
+anyhow = "1.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+midi-types = "0.2"
+rosc = "0.10"
+futures = "0.3"
+rand = "0.9.2"
