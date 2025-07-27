@@ -62,6 +62,8 @@ pub struct DeviceMapping {
     pub device_id: String,
     /// MIDI channel to listen on (1-16)
     pub listen_channel: u8,
+    /// MIDI channel to send commands on (1-16) for MIDI destinations
+    pub send_channel: Option<u8>,
     /// Destination for commands from this device
     pub destination: Destination,
 }

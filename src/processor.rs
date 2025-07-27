@@ -17,6 +17,9 @@ pub struct MidiProcessor {
     osc_socket: Option<UdpSocket>,
     session_manager: Option<SessionManager>,
     current_bpm: Arc<tokio::sync::RwLock<Option<f64>>>,
+    // Cancellation token for tap tempo operations
+    tap_tempo_cancel_tx: tokio::sync::watch::Sender<u64>,
+    tap_tempo_cancel_rx: tokio::sync::watch::Receiver<u64>,
 }
 
 impl MidiProcessor {
@@ -27,12 +30,17 @@ impl MidiProcessor {
         // Create a UDP socket for OSC messages
         let osc_socket = UdpSocket::bind("0.0.0.0:0").ok();
 
+        // Create cancellation channel for tap tempo operations
+        let (tap_tempo_cancel_tx, tap_tempo_cancel_rx) = tokio::sync::watch::channel(0u64);
+
         Ok(Self {
             device_config,
             map_config,
             osc_socket,
             session_manager: None,
             current_bpm: Arc::new(tokio::sync::RwLock::new(None)),
+            tap_tempo_cancel_tx,
+            tap_tempo_cancel_rx,
         })
     }
 
@@ -95,7 +103,12 @@ impl MidiProcessor {
 
                         // Execute all commands for this program
                         for command in &device_program.commands {
-                            self.execute_command(command, &mapping.destination).await?;
+                            self.execute_command(
+                                command,
+                                &mapping.destination,
+                                mapping.send_channel,
+                            )
+                            .await?;
                         }
                     } else {
                         warn!("Program {} not found on device '{}'", program, device.name);
@@ -111,20 +124,52 @@ impl MidiProcessor {
 
     /// Update tempo on all devices that have tempo specifications
     async fn update_device_tempos(&self, bpm: f64) -> Result<()> {
-        let map_config = self.map_config.read().await;
-        let device_config = self.device_config.read().await;
+        // Cancel any ongoing tap tempo operations first
+        let cancel_signal = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
 
-        for mapping in &map_config.device_mappings {
-            if let Some(device) = device_config.get_device(&mapping.device_id) {
-                if let Some(ref tempo_spec) = device.tempo_spec {
-                    info!(
-                        "Updating tempo for device '{}' to {:.1} BPM",
-                        device.name, bpm
-                    );
-                    self.send_tempo_update(tempo_spec, bpm, &mapping.destination)
-                        .await?;
+        if self.tap_tempo_cancel_tx.send(cancel_signal).is_err() {
+            warn!("Failed to send tap tempo cancellation signal");
+        }
+
+        // Collect tempo update tasks while holding locks briefly
+        let tempo_updates = {
+            let map_config = self.map_config.read().await;
+            let device_config = self.device_config.read().await;
+
+            let mut updates = Vec::new();
+            for mapping in &map_config.device_mappings {
+                if let Some(device) = device_config.get_device(&mapping.device_id) {
+                    if let Some(ref tempo_spec) = device.tempo_spec {
+                        info!(
+                            "Updating tempo for device '{}' to {:.1} BPM",
+                            device.name, bpm
+                        );
+                        updates.push((
+                            tempo_spec.clone(),
+                            mapping.destination.clone(),
+                            mapping.send_channel,
+                        ));
+                    }
                 }
             }
+            updates
+        }; // Locks are released here
+
+        // Execute tempo updates without holding any locks
+        // Use a different ID for the new operations
+        let operation_id = cancel_signal + 1; // Use a different ID for new operations
+
+        // Set the channel to the new operation ID so new operations know they should continue
+        if self.tap_tempo_cancel_tx.send(operation_id).is_err() {
+            warn!("Failed to send new operation ID");
+        }
+
+        for (tempo_spec, destination, channel) in tempo_updates {
+            self.send_tempo_update(&tempo_spec, bpm, &destination, channel, operation_id)
+                .await?;
         }
 
         Ok(())
@@ -136,16 +181,19 @@ impl MidiProcessor {
         tempo_spec: &TempoSpec,
         bpm: f64,
         destination: &Destination,
+        channel: Option<u8>,
+        cancel_id: u64,
     ) -> Result<()> {
         match tempo_spec {
             TempoSpec::TapTempo { commands } => {
-                self.send_tap_tempo(commands, bpm, destination).await?;
+                self.send_tap_tempo(commands, bpm, destination, channel, cancel_id)
+                    .await?;
             }
             TempoSpec::RawTempo {
                 commands,
                 data_type,
             } => {
-                self.send_raw_tempo(commands, data_type, bpm, destination)
+                self.send_raw_tempo(commands, data_type, bpm, destination, channel)
                     .await?;
             }
         }
@@ -158,29 +206,54 @@ impl MidiProcessor {
         commands: &[Command],
         bpm: f64,
         destination: &Destination,
+        channel: Option<u8>,
+        cancel_id: u64,
     ) -> Result<()> {
         // Calculate interval between taps (quarter note duration in milliseconds)
         let quarter_note_ms = (60.0 / bpm * 1000.0) as u64;
 
         info!(
-            "Sending tap tempo: 4 taps with {}ms intervals using {} commands",
+            "Sending tap tempo: 4 taps with {}ms intervals using {} commands (cancel_id: {})",
             quarter_note_ms,
-            commands.len()
+            commands.len(),
+            cancel_id
         );
 
         // Send 4 taps, each a quarter note apart
         for i in 0..4 {
+            // Check if we've been cancelled
+            if *self.tap_tempo_cancel_rx.borrow() != cancel_id {
+                info!("Tap tempo cancelled (cancel_id: {})", cancel_id);
+                return Ok(());
+            }
+
             // Execute all commands for this tap
             for command in commands {
-                self.execute_command(command, destination).await?;
+                self.execute_command(command, destination, channel).await?;
             }
 
             // Wait for the next tap (except after the last one)
             if i < 3 {
-                tokio::time::sleep(Duration::from_millis(quarter_note_ms)).await;
+                // Use a cancellable sleep
+                let sleep_future = tokio::time::sleep(Duration::from_millis(quarter_note_ms));
+                let mut cancel_rx = self.tap_tempo_cancel_rx.clone();
+
+                tokio::select! {
+                    _ = sleep_future => {
+                        // Sleep completed normally
+                    }
+                    _ = cancel_rx.changed() => {
+                        // We've been cancelled
+                        if *cancel_rx.borrow() != cancel_id {
+                            info!("Tap tempo cancelled during sleep (cancel_id: {})", cancel_id);
+                            return Ok(());
+                        }
+                    }
+                }
             }
         }
 
+        info!("Tap tempo completed (cancel_id: {})", cancel_id);
         Ok(())
     }
 
@@ -191,6 +264,7 @@ impl MidiProcessor {
         data_type: &TempoDataType,
         bpm: f64,
         destination: &Destination,
+        channel: Option<u8>,
     ) -> Result<()> {
         // Calculate the value to send based on data type
         let value = match data_type {
@@ -236,10 +310,9 @@ impl MidiProcessor {
                         address: address.clone(),
                         args: modified_args,
                     };
-                    self.execute_command(&osc_cmd, destination).await?;
+                    self.execute_command(&osc_cmd, destination, channel).await?;
                 }
                 Command::ControlChange {
-                    channel,
                     controller,
                     value: _,
                 } => {
@@ -253,15 +326,14 @@ impl MidiProcessor {
                     };
 
                     let cc_cmd = Command::ControlChange {
-                        channel: *channel,
                         controller: *controller,
                         value: cc_value,
                     };
-                    self.execute_command(&cc_cmd, destination).await?;
+                    self.execute_command(&cc_cmd, destination, channel).await?;
                 }
                 _ => {
                     // Execute other commands as-is
-                    self.execute_command(command, destination).await?;
+                    self.execute_command(command, destination, channel).await?;
                 }
             }
         }
@@ -270,19 +342,27 @@ impl MidiProcessor {
     }
 
     /// Execute a command to the specified destination
-    async fn execute_command(&self, command: &Command, destination: &Destination) -> Result<()> {
+    async fn execute_command(
+        &self,
+        command: &Command,
+        destination: &Destination,
+        channel: Option<u8>,
+    ) -> Result<()> {
         match command {
-            Command::ProgramChange { channel, program } => {
-                self.send_midi_command(destination, *channel, *program)
-                    .await?;
+            Command::ProgramChange { program } => {
+                if let Some(ch) = channel {
+                    self.send_midi_command(destination, ch, *program).await?;
+                } else {
+                    warn!("No channel specified for MIDI Program Change command");
+                }
             }
-            Command::ControlChange {
-                channel,
-                controller,
-                value,
-            } => {
-                self.send_midi_control_change(destination, *channel, *controller, *value)
-                    .await?;
+            Command::ControlChange { controller, value } => {
+                if let Some(ch) = channel {
+                    self.send_midi_control_change(destination, ch, *controller, *value)
+                        .await?;
+                } else {
+                    warn!("No channel specified for MIDI Control Change command");
+                }
             }
             Command::Osc { address, args } => {
                 self.send_osc_command(destination, address, args).await?;

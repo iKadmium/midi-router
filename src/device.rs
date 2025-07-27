@@ -18,14 +18,10 @@ pub enum DeviceType {
 pub enum Command {
     /// MIDI Program Change command
     #[serde(rename = "program_change")]
-    ProgramChange { channel: u8, program: u8 },
+    ProgramChange { program: u8 },
     /// MIDI Control Change command
     #[serde(rename = "control_change")]
-    ControlChange {
-        channel: u8,
-        controller: u8,
-        value: u8,
-    },
+    ControlChange { controller: u8, value: u8 },
     /// OSC message command
     #[serde(rename = "osc")]
     Osc { address: String, args: Vec<OscArg> },
